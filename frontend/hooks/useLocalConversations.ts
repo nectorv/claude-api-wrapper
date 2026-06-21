@@ -22,80 +22,77 @@ export function useLocalConversations() {
 
   const active = conversations.find((c) => c.id === activeId) ?? null
 
-  const persist = useCallback((list: StoredConversation[]) => {
-    setConversations(list)
-    saveConversations(list)
-  }, [])
-
+  // Use functional setConversations so callbacks never close over stale state
   const createConversation = useCallback(
     (config: { model: string; systemPrompt: string; thinkingEnabled: boolean }) => {
       const conv = newConversation(config)
-      const updated = [conv, ...conversations]
-      persist(updated)
+      setConversations((prev) => {
+        const updated = [conv, ...prev]
+        saveConversations(updated)
+        return updated
+      })
       setActiveId(conv.id)
       return conv
     },
-    [conversations, persist]
+    []
   )
 
-  const deleteConversation = useCallback(
-    (id: string) => {
-      const updated = conversations.filter((c) => c.id !== id)
-      persist(updated)
-      if (activeId === id) setActiveId(updated[0]?.id ?? null)
-    },
-    [conversations, activeId, persist]
-  )
+  const deleteConversation = useCallback((id: string) => {
+    setConversations((prev) => {
+      const updated = prev.filter((c) => c.id !== id)
+      saveConversations(updated)
+      return updated
+    })
+    setActiveId((prev) => (prev === id ? null : prev))
+  }, [])
 
-  const appendMessage = useCallback(
-    (convId: string, msg: StoredMessage) => {
-      const updated = conversations.map((c) => {
+  const appendMessage = useCallback((convId: string, msg: StoredMessage) => {
+    setConversations((prev) => {
+      const updated = prev.map((c) => {
         if (c.id !== convId) return c
         const messages = [...c.messages, msg]
         const title =
           c.messages.length === 0 && msg.role === 'user'
             ? deriveTitle(msg.content)
             : c.title
-        return {
-          ...c,
-          messages,
-          title,
-          updatedAt: new Date().toISOString(),
-        }
+        return { ...c, messages, title, updatedAt: new Date().toISOString() }
       })
-      persist(updated)
-    },
-    [conversations, persist]
-  )
+      saveConversations(updated)
+      return updated
+    })
+  }, [])
 
   const updateLastAssistant = useCallback(
     (convId: string, patch: Partial<StoredMessage>) => {
-      const updated = conversations.map((c) => {
-        if (c.id !== convId) return c
-        const messages = [...c.messages]
-        const lastIdx = messages.findLastIndex((m) => m.role === 'assistant')
-        if (lastIdx === -1) return c
-        messages[lastIdx] = { ...messages[lastIdx], ...patch }
-        return { ...c, messages, updatedAt: new Date().toISOString() }
+      setConversations((prev) => {
+        const updated = prev.map((c) => {
+          if (c.id !== convId) return c
+          const messages = [...c.messages]
+          const lastIdx = messages.findLastIndex((m) => m.role === 'assistant')
+          if (lastIdx === -1) return c
+          messages[lastIdx] = { ...messages[lastIdx], ...patch }
+          return { ...c, messages, updatedAt: new Date().toISOString() }
+        })
+        saveConversations(updated)
+        return updated
       })
-      persist(updated)
     },
-    [conversations, persist]
+    []
   )
 
-  const addTokens = useCallback(
-    (convId: string, tokens: number) => {
-      const updated = conversations.map((c) =>
+  const addTokens = useCallback((convId: string, tokens: number) => {
+    setConversations((prev) => {
+      const updated = prev.map((c) =>
         c.id === convId ? { ...c, totalTokens: c.totalTokens + tokens } : c
       )
-      persist(updated)
-    },
-    [conversations, persist]
-  )
+      saveConversations(updated)
+      return updated
+    })
+  }, [])
 
-  const compactConversation = useCallback(
-    (convId: string, summary: string) => {
-      const updated = conversations.map((c) => {
+  const compactConversation = useCallback((convId: string, summary: string) => {
+    setConversations((prev) => {
+      const updated = prev.map((c) => {
         if (c.id !== convId) return c
         return {
           ...c,
@@ -116,10 +113,10 @@ export function useLocalConversations() {
           updatedAt: new Date().toISOString(),
         }
       })
-      persist(updated)
-    },
-    [conversations, persist]
-  )
+      saveConversations(updated)
+      return updated
+    })
+  }, [])
 
   return {
     conversations,
