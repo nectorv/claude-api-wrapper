@@ -12,44 +12,50 @@ async function req<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json()
 }
 
-// ── Conversations ────────────────────────────────────────────────────────────
+// ── Stateless streaming (no server-side session) ──────────────────────────────
 
-export async function createConversation(params: {
+export async function streamMessages(params: {
   model: string
+  messages: Array<{ role: string; content: string | unknown[] }>
   system?: string
-  max_tokens?: number
   thinking?: { type: 'adaptive' } | { type: 'disabled' }
-}): Promise<{ conversation_id: string; model: string }> {
-  return req('/conversations', {
-    method: 'POST',
-    body: JSON.stringify({ max_tokens: 8096, ...params }),
-  })
-}
-
-export async function sendStreamingMessage(
-  conversationId: string,
-  content: string,
-  signal?: AbortSignal
-): Promise<Response> {
-  const res = await fetch(`${BASE}/conversations/${conversationId}/messages`, {
+  max_tokens?: number
+}, signal?: AbortSignal): Promise<Response> {
+  const res = await fetch(`${BASE}/messages/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content, stream: true }),
+    body: JSON.stringify({ max_tokens: 8096, stream: true, ...params }),
     signal,
   })
-  if (!res.ok) {
-    const text = await res.text()
-    throw new Error(`API ${res.status}: ${text}`)
-  }
+  if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`)
   return res
 }
 
-export async function deleteConversation(conversationId: string): Promise<void> {
-  await fetch(`${BASE}/conversations/${conversationId}`, { method: 'DELETE' })
-}
+// ── Summarise for compaction (stateless) ─────────────────────────────────────
 
-export async function compactConversation(conversationId: string): Promise<{ summary: string }> {
-  return req(`/conversations/${conversationId}/compact`, { method: 'POST', body: '{}' })
+export async function summarise(params: {
+  model: string
+  history: Array<{ role: string; content: string }>
+}): Promise<string> {
+  const body = {
+    model: params.model,
+    messages: [
+      {
+        role: 'user',
+        content:
+          'Summarize this conversation concisely, preserving all key facts, decisions, and context.\n\n' +
+          '<conversation>\n' +
+          JSON.stringify(params.history, null, 2) +
+          '\n</conversation>',
+      },
+    ],
+    max_tokens: 2048,
+  }
+  const data: { content: Array<{ type: string; text?: string }> } = await req('/messages', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+  return data.content.find((b) => b.type === 'text')?.text ?? ''
 }
 
 // ── Vision ───────────────────────────────────────────────────────────────────

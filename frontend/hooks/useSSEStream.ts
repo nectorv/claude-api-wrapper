@@ -1,7 +1,14 @@
 'use client'
 
 import { useCallback, useRef } from 'react'
-import { sendStreamingMessage } from '@/lib/api'
+import { streamMessages } from '@/lib/api'
+
+interface StreamParams {
+  model: string
+  messages: Array<{ role: string; content: string | unknown[] }>
+  system?: string
+  thinking?: { type: 'adaptive' } | { type: 'disabled' }
+}
 
 interface SSECallbacks {
   onTextDelta: (text: string) => void
@@ -13,70 +20,64 @@ interface SSECallbacks {
 export function useSSEStream() {
   const abortRef = useRef<AbortController | null>(null)
 
-  const stream = useCallback(
-    async (conversationId: string, content: string, callbacks: SSECallbacks) => {
-      abortRef.current = new AbortController()
+  const stream = useCallback(async (params: StreamParams, callbacks: SSECallbacks) => {
+    abortRef.current = new AbortController()
 
-      try {
-        const response = await sendStreamingMessage(
-          conversationId,
-          content,
-          abortRef.current.signal
-        )
+    try {
+      const response = await streamMessages(params, abortRef.current.signal)
+      const reader = response.body!.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let currentBlockType: 'text' | 'thinking' | null = null
 
-        const reader = response.body!.getReader()
-        const decoder = new TextDecoder()
-        let buffer = ''
-        let currentBlockType: 'text' | 'thinking' | null = null
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
 
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const parts = buffer.split('\n\n')
+        buffer = parts.pop() ?? ''
 
-          buffer += decoder.decode(value, { stream: true })
-          const parts = buffer.split('\n\n')
-          buffer = parts.pop() ?? ''
+        for (const part of parts) {
+          for (const line of part.split('\n')) {
+            if (!line.startsWith('data: ')) continue
+            const payload = line.slice(6).trim()
+            if (payload === '[DONE]') return
 
-          for (const part of parts) {
-            for (const line of part.split('\n')) {
-              if (!line.startsWith('data: ')) continue
-              const payload = line.slice(6).trim()
-              if (payload === '[DONE]') return
+            try {
+              const event = JSON.parse(payload)
 
-              try {
-                const event = JSON.parse(payload)
-
-                if (event.event_type === 'RawContentBlockStartEvent') {
-                  currentBlockType = event.content_block?.type ?? null
-                }
-
-                if (event.event_type === 'RawContentBlockDeltaEvent') {
-                  const delta = event.delta
-                  if (delta?.type === 'text_delta' && currentBlockType === 'text') {
-                    callbacks.onTextDelta(delta.text ?? '')
-                  }
-                  if (delta?.type === 'thinking_delta' && currentBlockType === 'thinking') {
-                    callbacks.onThinkingDelta(delta.thinking ?? '')
-                  }
-                }
-
-                if (event.event_type === 'final_message') {
-                  callbacks.onComplete(event.total_tokens ?? 0)
-                }
-              } catch {
-                // skip malformed event
+              if (event.event_type === 'RawContentBlockStartEvent') {
+                currentBlockType = event.content_block?.type ?? null
               }
+
+              if (event.event_type === 'RawContentBlockDeltaEvent') {
+                const delta = event.delta
+                if (delta?.type === 'text_delta' && currentBlockType === 'text') {
+                  callbacks.onTextDelta(delta.text ?? '')
+                }
+                if (delta?.type === 'thinking_delta' && currentBlockType === 'thinking') {
+                  callbacks.onThinkingDelta(delta.thinking ?? '')
+                }
+              }
+
+              if (event.event_type === 'final_message') {
+                const usage = event.usage ?? {}
+                const tokens = (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0)
+                callbacks.onComplete(tokens)
+              }
+            } catch {
+              // skip malformed event
             }
           }
         }
-      } catch (err) {
-        if ((err as Error).name !== 'AbortError') {
-          callbacks.onError(err as Error)
-        }
       }
-    },
-    []
-  )
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') {
+        callbacks.onError(err as Error)
+      }
+    }
+  }, [])
 
   const abort = useCallback(() => {
     abortRef.current?.abort()

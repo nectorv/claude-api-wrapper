@@ -9,7 +9,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { useState } from 'react'
-import { compactConversation } from '@/lib/api'
+import { summarise } from '@/lib/api'
 
 interface ConversationControlsProps {
   conversationId: string | null
@@ -26,8 +26,8 @@ export function ConversationControls({ conversationId, onNew, onClear }: Convers
     if (!conversationId) return
     setLoading(true)
     try {
-      const res = await compactConversation(conversationId)
-      setSummary(res.summary)
+      const text = await summarise({ model: 'claude-opus-4-8', history: [] })
+      setSummary(text)
       setCompactOpen(true)
     } catch (e) {
       alert((e as Error).message)

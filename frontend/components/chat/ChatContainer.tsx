@@ -3,154 +3,300 @@
 import { useState, useCallback } from 'react'
 import { nanoid } from 'nanoid'
 import { Sidebar } from '@/components/sidebar/Sidebar'
+import { ConversationList } from '@/components/conversations/ConversationList'
 import { MessageList } from './MessageList'
 import { MessageInput } from './MessageInput'
 import { useSSEStream } from '@/hooks/useSSEStream'
-import { useConversation } from '@/hooks/useConversation'
+import { useLocalConversations } from '@/hooks/useLocalConversations'
 import { useTokenCount } from '@/hooks/useTokenCount'
 import { useImageUpload } from '@/hooks/useImageUpload'
-import { analyzeImage } from '@/lib/api'
+import { analyzeImage, summarise } from '@/lib/api'
 import { DEFAULT_MODEL } from '@/lib/models'
 import type { ChatMessage, ImageAttachment } from '@/types/chat'
 
 export function ChatContainer() {
-  const [messages, setMessages] = useState<ChatMessage[]>([])
+  // UI-only state (not persisted — transient per-session display state)
+  const [uiMessages, setUiMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
-  const [model, setModel] = useState(DEFAULT_MODEL)
-  const [systemPrompt, setSystemPrompt] = useState('')
-  const [thinkingEnabled, setThinkingEnabled] = useState(false)
   const [isStreaming, setIsStreaming] = useState(false)
-  const [totalTokens, setTotalTokens] = useState(0)
   const [pendingImage, setPendingImage] = useState<ImageAttachment | null>(null)
 
+  // Default settings for new conversations
+  const [defaultModel, setDefaultModel] = useState(DEFAULT_MODEL)
+  const [defaultSystem, setDefaultSystem] = useState('')
+  const [defaultThinking, setDefaultThinking] = useState(false)
+
   const { stream, abort } = useSSEStream()
-  const { ensureSession, clearSession, getId } = useConversation()
   const { handleDragOver, handleDragLeave, handleDrop, openFilePicker } = useImageUpload()
 
-  const sessionMessages = messages.map((m) => ({ role: m.role, content: m.content }))
-  const inputTokens = useTokenCount(model, sessionMessages, input, systemPrompt, isStreaming)
+  const {
+    conversations,
+    active,
+    activeId,
+    setActiveId,
+    createConversation,
+    deleteConversation,
+    appendMessage,
+    updateLastAssistant,
+    addTokens,
+    compactConversation,
+  } = useLocalConversations()
 
-  const addMessage = useCallback((msg: ChatMessage) => {
-    setMessages((prev) => [...prev, msg])
-    return msg.id
-  }, [])
+  // Sync UI messages when switching conversations
+  const switchTo = useCallback(
+    (id: string) => {
+      setActiveId(id)
+      const conv = conversations.find((c) => c.id === id)
+      if (!conv) return
+      setUiMessages(
+        conv.messages.map((m) => ({
+          id: m.id,
+          role: m.role,
+          content: m.content,
+          thinkingContent: m.thinkingContent,
+          status: 'done' as const,
+          imageAttachment: m.imagePreviewUrl
+            ? ({ previewUrl: m.imagePreviewUrl } as ImageAttachment)
+            : undefined,
+          timestamp: new Date(m.timestamp),
+        }))
+      )
+      setInput('')
+      setPendingImage(null)
+    },
+    [conversations, setActiveId]
+  )
 
-  const updateMessage = useCallback((id: string, patch: Partial<ChatMessage>) => {
-    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)))
-  }, [])
+  const handleNew = useCallback(() => {
+    const conv = createConversation({
+      model: defaultModel,
+      systemPrompt: defaultSystem,
+      thinkingEnabled: defaultThinking,
+    })
+    setUiMessages([])
+    setInput('')
+    setPendingImage(null)
+    setActiveId(conv.id)
+  }, [createConversation, defaultModel, defaultSystem, defaultThinking, setActiveId])
+
+  const handleDelete = useCallback(
+    (id: string) => {
+      deleteConversation(id)
+      if (id === activeId) {
+        setUiMessages([])
+        setInput('')
+      }
+    },
+    [deleteConversation, activeId]
+  )
+
+  const sessionMessages = (active?.messages ?? []).map((m) => ({
+    role: m.role,
+    content: m.content,
+  }))
+
+  const currentModel = active?.model ?? defaultModel
+  const currentSystem = active?.systemPrompt ?? defaultSystem
+
+  const inputTokens = useTokenCount(
+    currentModel,
+    sessionMessages,
+    input,
+    currentSystem,
+    isStreaming
+  )
 
   const handleSend = useCallback(async () => {
     const text = input.trim()
     if (!text && !pendingImage) return
     if (isStreaming) return
 
-    setInput('')
-    const userMsgId = nanoid()
+    // Ensure we have an active conversation
+    let convId = activeId
+    let conv = active
+    if (!convId || !conv) {
+      conv = createConversation({
+        model: defaultModel,
+        systemPrompt: defaultSystem,
+        thinkingEnabled: defaultThinking,
+      })
+      convId = conv.id
+      setActiveId(conv.id)
+      setUiMessages([])
+    }
 
-    // 1. Add user message
-    addMessage({
-      id: userMsgId,
-      role: 'user',
-      content: text,
-      imageAttachment: pendingImage ?? undefined,
-      status: 'done',
-      timestamp: new Date(),
-    })
+    setInput('')
     const img = pendingImage
     setPendingImage(null)
 
-    // 2. Add placeholder assistant message
+    const userMsgId = nanoid()
+    const userMsg: ChatMessage = {
+      id: userMsgId,
+      role: 'user',
+      content: text,
+      imageAttachment: img ?? undefined,
+      status: 'done',
+      timestamp: new Date(),
+    }
+    setUiMessages((prev) => [...prev, userMsg])
+    appendMessage(convId, {
+      id: userMsgId,
+      role: 'user',
+      content: text,
+      imagePreviewUrl: img?.previewUrl,
+      timestamp: new Date().toISOString(),
+    })
+
     const asstMsgId = nanoid()
-    addMessage({
+    const asstPlaceholder: ChatMessage = {
       id: asstMsgId,
       role: 'assistant',
       content: '',
       status: 'streaming',
       timestamp: new Date(),
-    })
+    }
+    setUiMessages((prev) => [...prev, asstPlaceholder])
     setIsStreaming(true)
 
     try {
-      // 3a. Vision path — image attached
+      // Vision path
       if (img) {
         const res = await analyzeImage({
-          model,
+          model: conv.model,
           prompt: text || 'Describe this image.',
           images: [{ type: 'base64', media_type: img.mediaType, data: img.base64 }],
         })
         const answer = res.content?.find((b) => b.type === 'text')?.text ?? '(no response)'
-        updateMessage(asstMsgId, { content: answer, status: 'done' })
+        setUiMessages((prev) =>
+          prev.map((m) => (m.id === asstMsgId ? { ...m, content: answer, status: 'done' } : m))
+        )
+        appendMessage(convId, {
+          id: asstMsgId,
+          role: 'assistant',
+          content: answer,
+          timestamp: new Date().toISOString(),
+        })
         setIsStreaming(false)
         return
       }
 
-      // 3b. Streaming conversation path
-      const convId = await ensureSession({ model, system: systemPrompt, thinkingEnabled })
+      // Streaming path — send full history to stateless endpoint
+      const history = [
+        ...(conv.messages ?? []).map((m) => ({ role: m.role, content: m.content })),
+        { role: 'user', content: text },
+      ]
 
-      await stream(convId, text, {
-        onTextDelta: (delta) => {
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === asstMsgId ? { ...m, content: m.content + delta } : m
+      const thinking =
+        conv.thinkingEnabled ? { type: 'adaptive' as const } : { type: 'disabled' as const }
+
+      let accText = ''
+      let accThinking = ''
+
+      await stream(
+        {
+          model: conv.model,
+          messages: history,
+          system: conv.systemPrompt || undefined,
+          thinking,
+        },
+        {
+          onTextDelta: (delta) => {
+            accText += delta
+            setUiMessages((prev) =>
+              prev.map((m) =>
+                m.id === asstMsgId ? { ...m, content: m.content + delta } : m
+              )
             )
-          )
-        },
-        onThinkingDelta: (delta) => {
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === asstMsgId
-                ? { ...m, thinkingContent: (m.thinkingContent ?? '') + delta }
-                : m
+          },
+          onThinkingDelta: (delta) => {
+            accThinking += delta
+            setUiMessages((prev) =>
+              prev.map((m) =>
+                m.id === asstMsgId
+                  ? { ...m, thinkingContent: (m.thinkingContent ?? '') + delta }
+                  : m
+              )
             )
-          )
-        },
-        onComplete: (tokens) => {
-          setTotalTokens((prev) => prev + tokens)
-          updateMessage(asstMsgId, { status: 'done' })
-          setIsStreaming(false)
-        },
-        onError: (err) => {
-          updateMessage(asstMsgId, {
-            content: `Error: ${err.message}`,
-            status: 'error',
-          })
-          setIsStreaming(false)
-        },
-      })
+          },
+          onComplete: (tokens) => {
+            setUiMessages((prev) =>
+              prev.map((m) => (m.id === asstMsgId ? { ...m, status: 'done' } : m))
+            )
+            appendMessage(convId!, {
+              id: asstMsgId,
+              role: 'assistant',
+              content: accText,
+              thinkingContent: accThinking || undefined,
+              timestamp: new Date().toISOString(),
+            })
+            addTokens(convId!, tokens)
+            setIsStreaming(false)
+          },
+          onError: (err) => {
+            setUiMessages((prev) =>
+              prev.map((m) =>
+                m.id === asstMsgId
+                  ? { ...m, content: `Error: ${err.message}`, status: 'error' }
+                  : m
+              )
+            )
+            setIsStreaming(false)
+          },
+        }
+      )
     } catch (err) {
-      updateMessage(asstMsgId, {
-        content: `Error: ${(err as Error).message}`,
-        status: 'error',
-      })
+      setUiMessages((prev) =>
+        prev.map((m) =>
+          m.id === asstMsgId
+            ? { ...m, content: `Error: ${(err as Error).message}`, status: 'error' }
+            : m
+        )
+      )
       setIsStreaming(false)
     }
-  }, [input, pendingImage, isStreaming, model, systemPrompt, thinkingEnabled, addMessage, updateMessage, stream, ensureSession])
+  }, [
+    input, pendingImage, isStreaming, activeId, active, defaultModel,
+    defaultSystem, defaultThinking, createConversation, setActiveId,
+    appendMessage, addTokens, stream, analyzeImage,
+  ])
 
   const handleStop = useCallback(() => {
     abort()
-    setMessages((prev) =>
+    setUiMessages((prev) =>
       prev.map((m) => (m.status === 'streaming' ? { ...m, status: 'done' } : m))
     )
     setIsStreaming(false)
   }, [abort])
 
-  const handleNew = useCallback(async () => {
-    await clearSession()
-    setMessages([])
-    setInput('')
-    setPendingImage(null)
-    setTotalTokens(0)
-    setIsStreaming(false)
-  }, [clearSession])
-
-  const handleClear = useCallback(async () => {
-    await clearSession()
-    setMessages([])
-    setInput('')
-    setPendingImage(null)
-    setTotalTokens(0)
-    setIsStreaming(false)
-  }, [clearSession])
+  const handleCompact = useCallback(async () => {
+    if (!activeId || !active || active.messages.length < 4) return ''
+    try {
+      const summary = await summarise({
+        model: active.model,
+        history: active.messages.map((m) => ({ role: m.role, content: m.content })),
+      })
+      compactConversation(activeId, summary)
+      setUiMessages([
+        {
+          id: nanoid(),
+          role: 'user',
+          content: `[Conversation summary]\n${summary}`,
+          status: 'done',
+          timestamp: new Date(),
+        },
+        {
+          id: nanoid(),
+          role: 'assistant',
+          content: 'Understood. I have context from the summary above.',
+          status: 'done',
+          timestamp: new Date(),
+        },
+      ])
+      return summary ?? ''
+    } catch {
+      return ''
+    }
+  }, [activeId, active, compactConversation])
 
   return (
     <div
@@ -159,31 +305,47 @@ export function ChatContainer() {
       onDragLeave={handleDragLeave}
       onDrop={(e) => handleDrop(e, setPendingImage)}
     >
-      {/* Sidebar — hidden on mobile, visible on md+ */}
+      {/* Conversation list — hidden on mobile */}
+      <div className="hidden md:flex w-64 shrink-0 border-r border-border flex-col">
+        <div className="p-4 border-b border-border">
+          <h1 className="font-semibold text-sm">Claude</h1>
+          <p className="text-xs text-muted-foreground">API Wrapper</p>
+        </div>
+        <div className="flex-1 min-h-0">
+          <ConversationList
+            conversations={conversations}
+            activeId={activeId}
+            onSelect={switchTo}
+            onNew={handleNew}
+            onDelete={handleDelete}
+          />
+        </div>
+      </div>
+
+      {/* Settings sidebar */}
       <div className="hidden md:flex">
         <Sidebar
-          model={model}
-          onModelChange={setModel}
-          systemPrompt={systemPrompt}
-          onSystemPromptChange={setSystemPrompt}
-          thinkingEnabled={thinkingEnabled}
-          onThinkingChange={setThinkingEnabled}
-          conversationId={getId()}
-          onNew={handleNew}
-          onClear={handleClear}
-          totalTokens={totalTokens}
+          model={active?.model ?? defaultModel}
+          onModelChange={(m) => setDefaultModel(m)}
+          systemPrompt={active?.systemPrompt ?? defaultSystem}
+          onSystemPromptChange={setDefaultSystem}
+          thinkingEnabled={active?.thinkingEnabled ?? defaultThinking}
+          onThinkingChange={setDefaultThinking}
+          totalTokens={active?.totalTokens ?? 0}
+          onCompact={handleCompact}
+          hasConversation={!!active && active.messages.length > 0}
+          isStreaming={isStreaming}
         />
       </div>
 
-      {/* Main chat area */}
+      {/* Chat */}
       <div className="flex flex-col flex-1 min-w-0">
-        {/* Mobile header */}
         <header className="md:hidden flex items-center justify-between px-4 py-3 border-b border-border">
           <span className="font-semibold text-sm">Claude</span>
-          <span className="text-xs text-muted-foreground">{model.split('-').slice(1).join('-')}</span>
+          <span className="text-xs text-muted-foreground">{currentModel.split('-').slice(1).join('-')}</span>
         </header>
 
-        <MessageList messages={messages} />
+        <MessageList messages={uiMessages} />
 
         <MessageInput
           value={input}
