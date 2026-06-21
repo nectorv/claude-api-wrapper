@@ -186,8 +186,7 @@ export function ChatContainer() {
         { role: 'user', content: text },
       ]
 
-      const thinking =
-        conv.thinkingEnabled ? { type: 'adaptive' as const } : { type: 'disabled' as const }
+      const thinking = conv.thinkingEnabled ? { type: 'adaptive' as const } : undefined
 
       let accText = ''
       let accThinking = ''

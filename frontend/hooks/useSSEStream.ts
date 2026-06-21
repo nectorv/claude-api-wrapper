@@ -7,7 +7,7 @@ interface StreamParams {
   model: string
   messages: Array<{ role: string; content: string | unknown[] }>
   system?: string
-  thinking?: { type: 'adaptive' } | { type: 'disabled' }
+  thinking?: { type: 'adaptive' }
 }
 
 interface SSECallbacks {
@@ -29,6 +29,7 @@ export function useSSEStream() {
       const decoder = new TextDecoder()
       let buffer = ''
       let currentBlockType: 'text' | 'thinking' | null = null
+      let completed = false
 
       while (true) {
         const { done, value } = await reader.read()
@@ -42,7 +43,10 @@ export function useSSEStream() {
           for (const line of part.split('\n')) {
             if (!line.startsWith('data: ')) continue
             const payload = line.slice(6).trim()
-            if (payload === '[DONE]') return
+            if (payload === '[DONE]') {
+              if (!completed) { completed = true; callbacks.onComplete(0) }
+              return
+            }
 
             try {
               const event = JSON.parse(payload)
@@ -64,6 +68,7 @@ export function useSSEStream() {
               if (event.event_type === 'final_message') {
                 const usage = event.usage ?? {}
                 const tokens = (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0)
+                completed = true
                 callbacks.onComplete(tokens)
               }
             } catch {
@@ -72,6 +77,9 @@ export function useSSEStream() {
           }
         }
       }
+
+      // Stream ended without [DONE] — ensure UI is unblocked
+      if (!completed) callbacks.onComplete(0)
     } catch (err) {
       if ((err as Error).name !== 'AbortError') {
         callbacks.onError(err as Error)

@@ -13,7 +13,6 @@ router = APIRouter(prefix="/messages", tags=["streaming"])
 
 
 async def _event_stream(client: anthropic.Anthropic, params: dict[str, Any]) -> AsyncGenerator[str, None]:
-    params["stream"] = True
     with client.messages.stream(**params) as stream:
         for event in stream:
             event_type = type(event).__name__
