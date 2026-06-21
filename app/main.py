@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 
 from .routes import (
     batches, caching, conversations, files,
@@ -49,10 +50,6 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "claude-api-wrapper"}
 
 
-@app.get("/", tags=["health"])
-def root() -> dict[str, str]:
-    return {
-        "service": "Claude API Wrapper",
-        "docs": "/docs",
-        "health": "/health",
-    }
+@app.get("/", include_in_schema=False)
+def root() -> RedirectResponse:
+    return RedirectResponse(url="/docs")
