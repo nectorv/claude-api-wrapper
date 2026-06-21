@@ -1,8 +1,8 @@
 [build]
-builder = "dockerfile"
-dockerfilePath = "frontend/Dockerfile"
+builder = "nixpacks"
 
 [deploy]
+startCommand = "npm start"
 healthcheckPath = "/"
 healthcheckTimeout = 60
 restartPolicyType = "on_failure"
