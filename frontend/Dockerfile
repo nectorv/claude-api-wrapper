@@ -1,21 +1,17 @@
-FROM node:20-alpine AS builder
+FROM node:20-alpine
 WORKDIR /app
+
 COPY package*.json ./
 RUN npm ci
+
 COPY . .
+
 ENV NEXT_TELEMETRY_DISABLED=1
-ARG NEXT_PUBLIC_API_BASE_URL
-ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL
+ENV NEXT_PUBLIC_API_BASE_URL=https://claude-api-wrapper-production.up.railway.app
+
 RUN npm run build
 
-FROM node:20-alpine AS runner
-WORKDIR /app
 ENV NODE_ENV=production
-ENV NEXT_TELEMETRY_DISABLED=1
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/public ./public
+
 EXPOSE 3000
-ENV PORT=3000
-ENV HOSTNAME="0.0.0.0"
-CMD ["node", "server.js"]
+CMD ["sh", "-c", "npm start"]
